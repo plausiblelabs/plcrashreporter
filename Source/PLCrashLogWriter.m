@@ -58,6 +58,25 @@
 
 /**
  * @internal
+ * See https://github.com/apple/swift/blob/master/include/swift/Runtime/Debug.h
+ */
+#define CRASHREPORTER_ANNOTATIONS_VERSION 5
+#define CRASHREPORTER_ANNOTATIONS_SECTION "__crash_info"
+#define CRASHREPORTER_ANNOTATIONS_ALIGN __attribute__((aligned(8)))
+
+struct crashreporter_annotations_t {
+  unsigned long version;
+  const char    *message;
+  const char    *signature;
+  const char    *backtrace;
+  const char    *message2;
+  uint64_t      thread;
+  unsigned int  dialog_mode;
+  unsigned int  abort_cause;
+} CRASHREPORTER_ANNOTATIONS_ALIGN;
+
+/**
+ * @internal
  * Protobuf Field IDs, as defined in crashreport.proto
  */
 enum {
@@ -179,6 +198,9 @@ enum {
     
     /** CrashReport.signal.mach_exception */
     PLCRASH_PROTO_SIGNAL_MACH_EXCEPTION_ID = 4,
+
+    /** CrashReport.signal.annotation_message */
+    PLCRASH_PROTO_SIGNAL_ANNOTATION_MESSAGE_ID = 5,
     
     
     /** CrashReport.signal.mach_exception.type */
@@ -1116,7 +1138,7 @@ static size_t plcrash_writer_write_mach_signal (plcrash_async_file_t *file, plcr
  * @param file Output file
  * @param siginfo The signal information
  */
-static size_t plcrash_writer_write_signal (plcrash_async_file_t *file, plcrash_log_signal_info_t *siginfo) {
+static size_t plcrash_writer_write_signal (plcrash_async_file_t *file, plcrash_log_signal_info_t *siginfo, struct crashreporter_annotations_t *annotations) {
     size_t rv = 0;
     
     /* BSD signal info is always required in the current report format; this restriction will be lifted
@@ -1159,6 +1181,11 @@ static size_t plcrash_writer_write_signal (plcrash_async_file_t *file, plcrash_l
         /* Write message */
         rv += plcrash_writer_pack(file, PLCRASH_PROTO_SIGNAL_MACH_EXCEPTION_ID, PLPROTOBUF_C_TYPE_MESSAGE, &size);
         rv += plcrash_writer_write_mach_signal(file, siginfo->mach_info);
+    }
+
+    /* Message from crash reporter annotations */
+    if (annotations != NULL && annotations->message != NULL) {
+        rv += plcrash_writer_pack(file, PLCRASH_PROTO_SIGNAL_ANNOTATION_MESSAGE_ID, PLPROTOBUF_C_TYPE_STRING, annotations->message);
     }
 
     return rv;
@@ -1363,6 +1390,17 @@ plcrash_error_t plcrash_log_writer_write (plcrash_log_writer_t *writer,
         plcrash_writer_write_binary_image(file, &image->macho_image);
     }
 
+    /* Try to read crash reporter annotations */
+    struct crashreporter_annotations_t *annotations = NULL;
+    image = plcrash_async_image_containing_address(image_list, siginfo->bsd_info->address);
+    if (image != NULL) {
+        plcrash_async_mobject_t mobj;
+        err = plcrash_async_macho_map_section(&image->macho_image, "__DATA", CRASHREPORTER_ANNOTATIONS_SECTION, &mobj);
+        if (err == PLCRASH_ESUCCESS) {
+            annotations = (struct crashreporter_annotations_t *)(mobj.address + mobj.vm_slide);
+        }
+    }
+
     plcrash_async_image_list_set_reading(image_list, false);
 
     /* Exception */
@@ -1380,9 +1418,9 @@ plcrash_error_t plcrash_log_writer_write (plcrash_log_writer_t *writer,
         uint32_t size;
         
         /* Calculate the message size */
-        size = plcrash_writer_write_signal(NULL, siginfo);
+        size = plcrash_writer_write_signal(NULL, siginfo, annotations);
         plcrash_writer_pack(file, PLCRASH_PROTO_SIGNAL_ID, PLPROTOBUF_C_TYPE_MESSAGE, &size);
-        plcrash_writer_write_signal(file, siginfo);
+        plcrash_writer_write_signal(file, siginfo, annotations);
     }
     
     plcrash_async_symbol_cache_free(&findContext);
